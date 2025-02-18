@@ -61,6 +61,7 @@ var (
 )
 
 func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
+
 	var (
 		spend    uint16
 		size     int64
@@ -110,7 +111,10 @@ func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
 	reverseProxy.Rewrite = func(req *httputil.ProxyRequest) {
 		begin = time.Now()
 		req.Out.Header.Set("HOST", r.Host)
-		req.Out.Header.Del("Accept-Encoding")
+		// 对于流式传输，保留原始的 Accept-Encoding
+		if !isStreamResponse(r.Header) {
+			req.Out.Header.Del("Accept-Encoding")
+		}
 	}
 
 	tr := http.DefaultTransport.(*http.Transport)
@@ -123,65 +127,51 @@ func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
 	reverseProxy.Transport = tr
 
 	reverseProxy.ErrorHandler = func(resp http.ResponseWriter, req *http.Request, err error) {
-		fmt.Printf("ErrorHandler url(%v) error(%v)\n", req.URL.String(), err)
+		// fmt.Printf("ErrorHandler url(%v) error(%v)\n", req.URL.String(), err)
 	}
 
 	reverseProxy.ModifyResponse = func(resp *http.Response) error {
 		spend = uint16(time.Since(begin).Milliseconds())
 
+		// 处理响应头
 		respHeader := make(map[string]string)
 		for k := range resp.Header {
 			respHeader[k] = resp.Header.Get(k)
 		}
+
 		respCookie := make(map[string]string)
 		for _, v := range resp.Cookies() {
-			respCookie[v.Name] = v.Raw
+			respCookie[v.Name] = v.Value
 		}
 
-		contentType := ""
-		for _, v := range strings.Split(resp.Header.Get("Content-Type"), ";") {
-			v = strings.TrimSpace(v)
-			if v == "" {
-				continue
-			}
-			if strings.Contains(strings.ToLower(v), "charset=") {
-				continue
-			}
-			contentType = v
-			break
-		}
-
-		respTls := make(map[string]string)
-		if resp.TLS != nil {
-			respTls["ServerName"] = resp.TLS.ServerName
-			respTls["NegotiatedProtocol"] = resp.TLS.NegotiatedProtocol
-			version := "Unknown"
-			switch resp.TLS.Version {
-			case tls.VersionTLS10:
-				version = "1.0"
-			case tls.VersionTLS11:
-				version = "1.1"
-			case tls.VersionTLS12:
-				version = "1.2"
-			case tls.VersionTLS13:
-				version = "1.3"
-			}
-			respTls["Version"] = version
-			respTls["Unique"] = base64.StdEncoding.EncodeToString(resp.TLS.TLSUnique)
-			if r.TLS != nil {
-				if cipherSuite, ok := cipherSuiteMap[r.TLS.CipherSuite]; ok {
-					respTls["CipherSuite"] = cipherSuite
+		// 检查是否为流式响应
+		if isStreamResponse(resp.Header) {
+			// 对于流式响应，直接返回，不修改 body
+			if p.messageChan != nil {
+				p.messageChan <- &Message{
+					Url:        r.URL.String(),
+					RemoteAddr: r.RemoteAddr,
+					Method:     r.Method,
+					Type:       getContentType(resp.Header),
+					Time:       spend,
+					Status:     uint16(resp.StatusCode),
+					ReqHeader:  reqHeader,
+					ReqCookie:  reqCookie,
+					ReqBody:    string(reqBody),
+					RespHeader: respHeader,
+					RespCookie: respCookie,
+					RespTls:    getTLSInfo(resp.TLS, r.TLS),
 				}
 			}
+			return nil
 		}
 
-		// 一次性读取body
+		// 非流式响应的处理保持不变
 		responseData, err := io.ReadAll(resp.Body)
 		if err != nil {
 			fmt.Printf("io.ReadAll(resp.Body) error(%v)\n", err)
 			return err
 		}
-		resp.Body.Close()
 
 		respBody = string(responseData)
 		size = int64(len(responseData))
@@ -204,7 +194,7 @@ func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
 			Url:        r.URL.String(),
 			RemoteAddr: r.RemoteAddr,
 			Method:     r.Method,
-			Type:       contentType,
+			Type:       getContentType(resp.Header),
 			Time:       spend,
 			Size:       uint16(size),
 			Status:     uint16(resp.StatusCode),
@@ -214,12 +204,76 @@ func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
 			RespHeader: respHeader,
 			RespCookie: respCookie,
 			RespBody:   respBody,
-			RespTls:    respTls,
+			RespTls:    getTLSInfo(resp.TLS, r.TLS),
 		}
 		return nil
 	}
 
 	reverseProxy.ServeHTTP(rw, r)
+}
+
+// 新增：检查是否为流式响应
+func isStreamResponse(header http.Header) bool {
+	// 检查 WebSocket
+	if strings.ToLower(header.Get("Connection")) == "upgrade" &&
+		strings.ToLower(header.Get("Upgrade")) == "websocket" {
+		return true
+	}
+
+	// 检查 Transfer-Encoding
+	if header.Get("Transfer-Encoding") == "chunked" {
+		return true
+	}
+
+	// 检查 Content-Type
+	contentType := header.Get("Content-Type")
+	return strings.Contains(contentType, "text/event-stream") ||
+		strings.Contains(contentType, "application/x-ndjson") ||
+		strings.Contains(contentType, "multipart/x-mixed-replace")
+}
+
+// 新增：提取 Content-Type
+func getContentType(header http.Header) string {
+	contentType := header.Get("Content-Type")
+	for _, v := range strings.Split(contentType, ";") {
+		v = strings.TrimSpace(v)
+		if v == "" {
+			continue
+		}
+		if strings.Contains(strings.ToLower(v), "charset=") {
+			continue
+		}
+		return v
+	}
+	return ""
+}
+
+// 新增：获取 TLS 信息
+func getTLSInfo(respTLS, reqTLS *tls.ConnectionState) map[string]string {
+	tlsInfo := make(map[string]string)
+	if respTLS != nil {
+		tlsInfo["ServerName"] = respTLS.ServerName
+		tlsInfo["NegotiatedProtocol"] = respTLS.NegotiatedProtocol
+		version := "Unknown"
+		switch respTLS.Version {
+		case tls.VersionTLS10:
+			version = "1.0"
+		case tls.VersionTLS11:
+			version = "1.1"
+		case tls.VersionTLS12:
+			version = "1.2"
+		case tls.VersionTLS13:
+			version = "1.3"
+		}
+		tlsInfo["Version"] = version
+		tlsInfo["Unique"] = base64.StdEncoding.EncodeToString(respTLS.TLSUnique)
+		if reqTLS != nil {
+			if cipherSuite, ok := cipherSuiteMap[reqTLS.CipherSuite]; ok {
+				tlsInfo["CipherSuite"] = cipherSuite
+			}
+		}
+	}
+	return tlsInfo
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -254,33 +308,41 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.Method == http.MethodConnect {
+	if isHttpsRequest(r) {
 		p.handleHttps(w, r)
-	} else {
-		if r.URL.Host == "" {
-			r.URL.Host = r.Host
-		}
-
-		if r.URL.Scheme == "" {
-			r.URL.Scheme = "https"
-		}
-		for _, v := range p.replace {
-			if ok, _ := filepath.Match(v[0], r.URL.String()); ok {
-				if v[1] == "https://" || v[1] == "http://" {
-					r, err := http.NewRequest("GET", v[2], nil)
-					if err == nil {
-						p.doReplace1(w, r)
-					}
-				}
-				if v[1] == "file://" {
-					data, err := os.ReadFile("/" + v[2])
-					if err == nil {
-						p.doReplace2(w, data)
-					}
-				}
-				return
-			}
-		}
-		p.doRequest(w, r)
+		return
 	}
+
+	// 检查是否为 WebSocket 请求
+	if isWebSocketRequest(r) {
+		p.handleWebSocket(w, r)
+		return
+	}
+
+	if r.URL.Host == "" {
+		r.URL.Host = r.Host
+	}
+
+	if r.URL.Scheme == "" {
+		r.URL.Scheme = "https"
+	}
+	for _, v := range p.replace {
+		if ok, _ := filepath.Match(v[0], r.URL.String()); ok {
+			if v[1] == "https://" || v[1] == "http://" {
+				r, err := http.NewRequest("GET", v[2], nil)
+				if err == nil {
+					p.doReplace1(w, r)
+				}
+			}
+			if v[1] == "file://" {
+				data, err := os.ReadFile("/" + v[2])
+				if err == nil {
+					p.doReplace2(w, data)
+				}
+			}
+			return
+		}
+	}
+	p.doRequest(w, r)
+
 }
