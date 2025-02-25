@@ -1,0 +1,5 @@
+*.go linguist-detectable
+*.js linguist-vendored
+*.html linguist-vendored
+*.css linguist-vendored
+*.vue linguist-vendored
