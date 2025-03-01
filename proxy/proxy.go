@@ -25,8 +25,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/928799934/go-mitm/static"
 	"github.com/andybalholm/brotli"
-	"github.com/lizongying/go-mitm/static"
 )
 
 var cipherSuiteMap = map[uint16]string{

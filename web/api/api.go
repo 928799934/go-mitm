@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"sync/atomic"
 
-	"github.com/lizongying/go-mitm/proxy"
-	"github.com/lizongying/go-mitm/static"
+	"github.com/928799934/go-mitm/proxy"
+	"github.com/928799934/go-mitm/static"
 )
 
 type Api struct {

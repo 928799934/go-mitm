@@ -1,4 +1,4 @@
-module github.com/lizongying/go-mitm
+module github.com/928799934/go-mitm
 
 go 1.21.0
 

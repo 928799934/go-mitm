@@ -9,8 +9,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/lizongying/go-mitm/proxy"
-	"github.com/lizongying/go-mitm/web/api"
+	"github.com/928799934/go-mitm/proxy"
+	"github.com/928799934/go-mitm/web/api"
 )
 
 func main() {
