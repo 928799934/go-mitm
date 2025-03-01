@@ -493,11 +493,12 @@ func copyHeader(dst, src http.Header) {
 	}
 }
 
-func NewProxy(include string, exclude string, proxy string) (p *Proxy, err error) {
+func NewProxy(messageChan chan *Message, include string, exclude string, proxy string) (p *Proxy, err error) {
 	p = new(Proxy)
 	p.logger = slog.Default()
 	p.SetInclude(include)
 	p.SetExclude(exclude)
+	p.SetMessageChan(messageChan)
 
 	if P, err := url.Parse(proxy); err != nil {
 		p.proxy = P

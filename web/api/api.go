@@ -3,12 +3,13 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/lizongying/go-mitm/proxy"
-	"github.com/lizongying/go-mitm/static"
 	"io/fs"
 	"log"
 	"net/http"
 	"sync/atomic"
+
+	"github.com/lizongying/go-mitm/proxy"
+	"github.com/lizongying/go-mitm/static"
 )
 
 type Api struct {

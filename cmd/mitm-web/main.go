@@ -24,13 +24,13 @@ func main() {
 	lanIp := proxy.LanIp()
 	internetIp := proxy.InternetIp()
 
-	messageChan := make(chan *proxy.Message, 255)
+	messageChan := make(chan *proxy.Message, 10)
 
-	p, err := proxy.NewProxy(*includePtr, *excludePtr, *proxyPtr)
+	p, err := proxy.NewProxy(messageChan, *includePtr, *excludePtr, *proxyPtr)
 	if err != nil {
 		panic(err)
 	}
-	p.SetMessageChan(messageChan)
+
 	midSrv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", *midPortPtr),
 		Handler:      p,
