@@ -144,11 +144,3 @@ curl "https://httpbin.org/get" -x http://192.168.31.171:8082 --cacert ./static/t
 make
 ```
 
-<!-- ## TODO
-
-* python http.client
-* node https/request
-* java
-* middleware tmpdir save image/video
-* https proxy
-* replace -->

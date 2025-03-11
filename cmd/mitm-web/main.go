@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"flag"
 	"fmt"
 	"net/http"
@@ -10,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/928799934/go-mitm/proxy"
+	"github.com/928799934/go-mitm/static"
 	"github.com/928799934/go-mitm/web/api"
 )
 
@@ -18,37 +18,32 @@ func main() {
 	webPortPtr := flag.Int("web-port", 8083, "-web-port webPort")
 	includePtr := flag.String("include", "", "-include include")
 	excludePtr := flag.String("exclude", "localhost;127.0.0.1", "-exclude exclude")
-	proxyPtr := flag.String("proxy", "", "-proxy proxy")
+	proxyPtr := flag.String("proxy", "", "-proxy http://127.0.0.1:1080")
+	socks5Ptr := flag.String("socks5", "", "-socks5 127.0.0.1:1080")
 	flag.Parse()
 
 	lanIp := proxy.LanIp()
 	internetIp := proxy.InternetIp()
 
-	messageChan := make(chan *proxy.Message, 10)
+	messageChan := make(chan *proxy.Message, 10240)
 
-	p, err := proxy.NewProxy(messageChan, *includePtr, *excludePtr, *proxyPtr)
+	p, err := proxy.NewProxy(fmt.Sprintf(":%d", *midPortPtr), static.CaCert, static.CaKey)
 	if err != nil {
 		panic(err)
 	}
 
-	midSrv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", *midPortPtr),
-		Handler:      p,
-		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
-	}
+	p.SetMessageChan(messageChan)
+	p.SetInclude(*includePtr)
+	p.SetExclude(*excludePtr)
+	p.SetProxy(*proxyPtr)
+	p.SetSocks5(*socks5Ptr)
+
+	p.Start()
+
 	fmt.Printf("Mid: http://%s:%d http://%s:%d http://%s:%d\n", "localhost", *midPortPtr, lanIp, *midPortPtr, internetIp, *midPortPtr)
-	go func() {
-		err = midSrv.ListenAndServe()
-		if err != nil {
-			if err != http.ErrServerClosed {
-				panic(err)
-			}
-		}
-	}()
 
 	defer func() {
-		p.Close()
-		midSrv.Close()
+		p.Stop()
 	}()
 
 	handler := api.NewApi(messageChan, lanIp, internetIp, *midPortPtr, p).Handler()
@@ -69,8 +64,6 @@ func main() {
 	}()
 
 	defer func() {
-		// ctx, _ := context.WithTimeout(context.TODO(), 10)
-		// srvApi.Shutdown(ctx)
 		srvApi.Close()
 	}()
 

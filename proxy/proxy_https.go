@@ -44,10 +44,6 @@ func (p *Proxy) handleHttps(w http.ResponseWriter, r *http.Request) {
 	g.Wait()
 }
 
-func (p *Proxy) start() error {
-	return p.srv.ServeTLS(p.listener, "", "")
-}
-
 func isHttpsRequest(r *http.Request) bool {
 	return r.Method == http.MethodConnect
 }

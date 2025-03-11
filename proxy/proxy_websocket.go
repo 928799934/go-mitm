@@ -13,6 +13,12 @@ import (
 )
 
 var (
+	dialer = &websocket.Dialer{
+		Proxy:             http.ProxyFromEnvironment,
+		HandshakeTimeout:  45 * time.Second,
+		EnableCompression: true,
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
+	}
 	// 添加 WebSocket upgrader
 	wsUpgrader = websocket.Upgrader{
 		CheckOrigin: func(r *http.Request) bool {
@@ -20,6 +26,25 @@ var (
 		},
 	}
 )
+
+func WebSocketDialer() *websocket.Dialer {
+	if socks5Func != nil && dialer.NetDialContext == nil {
+		dialer.NetDialContext = socks5Func
+	}
+
+	if socks5Func == nil && dialer.NetDialContext != nil {
+		dialer.NetDialContext = nil
+	}
+
+	if proxyFunc != nil && dialer.Proxy == nil {
+		dialer.Proxy = proxyFunc
+	}
+
+	if proxyFunc == nil && dialer.Proxy != nil {
+		dialer.Proxy = nil
+	}
+	return dialer
+}
 
 // 新增：处理 WebSocket 连接
 func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
@@ -71,18 +96,18 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer clientConn.Close()
 
 	// 连接目标 WebSocket 服务器
+	dialer := WebSocketDialer()
+	// dialer := &websocket.Dialer{
+	// 	// Proxy:             http.ProxyFromEnvironment,
+	// 	HandshakeTimeout:  45 * time.Second,
+	// 	EnableCompression: true,
+	// 	TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
+	// }
 
-	dialer := &websocket.Dialer{
-		// Proxy:             http.ProxyFromEnvironment,
-		HandshakeTimeout:  45 * time.Second,
-		EnableCompression: true,
-		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
-	}
-
-	dialer.Proxy = func(_ *http.Request) (*url.URL, error) {
-		return p.proxy, nil
-		// return url.Parse("http://127.0.0.1:1080")
-	}
+	// dialer.Proxy = func(_ *http.Request) (*url.URL, error) {
+	// 	return p.proxy, nil
+	// 	// return url.Parse("http://127.0.0.1:1080")
+	// }
 
 	targetConn, resp, err := dialer.Dial(uri, header)
 	if err != nil {
@@ -90,9 +115,10 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			copyHeader(w.Header(), resp.Header)
 			w.WriteHeader(resp.StatusCode)
 		} else {
-			fmt.Println("err:", err.Error())
+			fmt.Println("dialer.Dial err:", err.Error(), uri)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
+
 		fmt.Println("websocket return1", r.URL.String())
 		return
 	}

@@ -6,66 +6,67 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 var (
-	// tr = &http.Transport{
-	// 	DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-	// 		dialer := &net.Dialer{
-	// 			Timeout:   30 * time.Second,
-	// 			KeepAlive: 30 * time.Second,
-	// 		}
-	// 		conn, err := dialer.DialContext(ctx, network, addr)
-	// 		fmt.Println(network, addr, conn.RemoteAddr())
-	// 		return conn, err
-	// 	},
-	// 	DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-	// 		dialer := &tls.Dialer{
-	// 			NetDialer: &net.Dialer{
-	// 				Timeout:   30 * time.Second,
-	// 				KeepAlive: 30 * time.Second,
-	// 			},
-	// 			Config: &tls.Config{
-	// 				InsecureSkipVerify: true,
-	// 			},
-	// 		}
-	// 		conn, err := dialer.DialContext(ctx, network, addr)
-	// 		return conn, err
-	// 	},
-	// 	// MaxIdleConnsPerHost:   1000,
-	// 	// MaxConnsPerHost:       1000,
-	// 	// IdleConnTimeout:       30 * time.Second,
-	// 	// TLSHandshakeTimeout:   30 * time.Second,
-	// 	// ExpectContinueTimeout: 30 * time.Second,
-	// 	// TLSClientConfig: &tls.Config{
-	// 	// 	InsecureSkipVerify: true,
-	// 	// },
-	// 	ForceAttemptHTTP2: true,
-	// 	// DisableKeepAlives: true,
-	// 	//DisableCompression: true,
-	// }
+	tr = &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+	}
 
 	reverseProxyPool = &sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			return &httputil.ReverseProxy{ /*Transport: tr*/ }
 		},
 	}
 )
+
+func HttpTransport() http.RoundTripper {
+	if socks5Func != nil && tr.DialContext == nil {
+		tr.DialContext = socks5Func
+	}
+
+	if socks5Func == nil && tr.DialContext != nil {
+		tr.DialContext = (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext
+	}
+
+	if proxyFunc != nil && tr.Proxy == nil {
+		tr.Proxy = proxyFunc
+	}
+
+	if proxyFunc == nil && tr.Proxy != nil {
+		tr.Proxy = nil
+	}
+
+	return tr
+}
 
 func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
 
 	var (
 		spend uint16
 		size  int64
-		// respBody string
 	)
 
 	reqHeader := make(map[string]string)
@@ -83,13 +84,6 @@ func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
 
 	r.Body = io.NopCloser(io.TeeReader(r.Body, reqBody))
 
-	// reqBody, err := io.ReadAll(r.Body)
-	// if err != nil {
-	// 	http.Error(rw, "Failed to read request body", http.StatusInternalServerError)
-	// 	return
-	// }
-	// r.Body = io.NopCloser(bytes.NewBuffer(reqBody))
-
 	reqTls := make(map[string]string)
 	if r.TLS != nil {
 		reqTls["ServerName"] = r.TLS.ServerName
@@ -106,7 +100,7 @@ func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
 	// 获取 代理资源
 	reverseProxy := reverseProxyPool.Get().(*httputil.ReverseProxy)
 	defer func() {
-		reverseProxy.Director = nil
+		reverseProxy.Rewrite = nil
 		reverseProxy.ModifyResponse = nil
 		reverseProxyPool.Put(reverseProxy)
 	}()
@@ -121,15 +115,16 @@ func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	tr := http.DefaultTransport.(*http.Transport)
-	if p.proxy != nil {
-		tr.Proxy = func(_ *http.Request) (*url.URL, error) {
-			return p.proxy, nil
-		}
-	}
-	tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	// tr := http.DefaultTransport.(*http.Transport)
+	// if p.proxy != nil {
+	// 	tr.Proxy = func(_ *http.Request) (*url.URL, error) {
+	// 		return p.proxy, nil
+	// 	}
+	// }
+	// tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 
-	reverseProxy.Transport = tr
+	// reverseProxy.Transport = tr
+	reverseProxy.Transport = HttpTransport()
 
 	reverseProxy.ErrorHandler = func(resp http.ResponseWriter, req *http.Request, err error) {
 		// fmt.Printf("ErrorHandler url(%v) error(%v)\n", req.URL.String(), err)
@@ -183,7 +178,6 @@ func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
 			return err
 		}
 
-		// respBody = string(responseData)
 		size = int64(len(responseData))
 
 		if len(responseData) > 0 {
@@ -193,7 +187,7 @@ func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
 				responseData = withGZIP(responseData)
 			}
 			// 重新计算 Content-Length
-			// resp.Header.Set("Content-Length", strconv.Itoa(len(responseData)))
+			resp.Header.Set("Content-Length", strconv.Itoa(len(responseData)))
 		}
 
 		// 重写 body
@@ -292,25 +286,20 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(r.Host, ":") {
 		host = host[:strings.Index(host, ":")]
 	}
-	if len(p.exclude) > 0 {
-		for _, v := range p.exclude {
-			matched, _ := filepath.Match(v, host)
-			if matched {
-				p.forward(w, r)
-				return
-			}
+
+	for _, v := range p.exclude {
+		if matched, _ := filepath.Match(v, host); matched {
+			p.forward(w, r)
+			return
 		}
 	}
 
 	include := true
-	if len(p.include) > 0 {
+	for _, v := range p.include {
 		include = false
-		for _, v := range p.include {
-			matched, _ := filepath.Match(v, host)
-			if matched {
-				include = true
-				break
-			}
+		if matched, _ := filepath.Match(v, host); matched {
+			include = true
+			break
 		}
 	}
 
@@ -337,23 +326,24 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Scheme == "" {
 		r.URL.Scheme = "https"
 	}
+
 	for _, v := range p.replace {
-		if ok, _ := filepath.Match(v[0], r.URL.String()); ok {
-			if v[1] == "https://" || v[1] == "http://" {
-				r, err := http.NewRequest("GET", v[2], nil)
-				if err == nil {
-					p.doReplace1(w, r)
-				}
-			}
-			if v[1] == "file://" {
-				data, err := os.ReadFile("/" + v[2])
-				if err == nil {
-					p.doReplace2(w, data)
-				}
-			}
-			return
+
+		if ok, _ := filepath.Match(v[0], r.URL.String()); !ok {
+			continue
 		}
+
+		switch v[1] {
+		case "http://", "https://":
+			if r, err := http.NewRequest(http.MethodGet, v[2], nil); err == nil {
+				p.doReplace1(w, r)
+			}
+		case "file://":
+			if data, err := os.ReadFile("/" + v[2]); err == nil {
+				p.doReplace2(w, data)
+			}
+		}
+		return
 	}
 	p.doRequest(w, r)
-
 }

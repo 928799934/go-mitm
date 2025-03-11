@@ -25,8 +25,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/928799934/go-mitm/static"
 	"github.com/andybalholm/brotli"
+	"golang.org/x/net/proxy"
 )
 
 var cipherSuiteMap = map[uint16]string{
@@ -57,13 +57,21 @@ var cipherSuiteMap = map[uint16]string{
 	0x1303: "TLS_CHACHA20_POLY1305_SHA256",
 }
 
+var (
+	proxyFunc  func(*http.Request) (*url.URL, error)
+	socks5Func func(ctx context.Context, network, addr string) (net.Conn, error)
+)
+
 type Proxy struct {
+	wg           sync.WaitGroup
 	rootCert     *x509.Certificate
 	rootKey      *rsa.PrivateKey
 	privateKey   *rsa.PrivateKey
 	listener     *Listener
-	srv          *http.Server
-	proxy        *url.URL
+	proxy        string
+	socks5       string
+	httpSrv      *http.Server
+	httpsSrv     *http.Server
 	serialNumber int64
 	messageChan  chan *Message
 	exclude      []string
@@ -75,6 +83,7 @@ type Proxy struct {
 func (p *Proxy) SetMessageChan(messageChan chan *Message) {
 	p.messageChan = messageChan
 }
+
 func (p *Proxy) getCertificate(domain string) (cert *tls.Certificate, err error) {
 	atomic.AddInt64(&p.serialNumber, 1)
 	serverTemplate := &x509.Certificate{
@@ -102,12 +111,10 @@ func (p *Proxy) getCertificate(domain string) (cert *tls.Certificate, err error)
 	}
 	return
 }
+
 func (p *Proxy) doReplace1(w http.ResponseWriter, r *http.Request) {
-	t := http.DefaultTransport.(*http.Transport)
-	t.Proxy = func(_ *http.Request) (*url.URL, error) {
-		return p.proxy, nil
-	}
-	response, err := t.RoundTrip(r)
+	tr := HttpTransport()
+	response, err := tr.RoundTrip(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -124,14 +131,6 @@ func (p *Proxy) doReplace1(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) doReplace2(w http.ResponseWriter, body []byte) {
 	w.WriteHeader(200)
 	_, _ = w.Write(body)
-}
-
-func (p *Proxy) Close() (err error) {
-	err = p.srv.Close()
-	if err != nil {
-		return
-	}
-	return
 }
 
 func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
@@ -183,14 +182,9 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 		}()
 		g.Wait()
 	} else {
-		t := http.DefaultTransport.(*http.Transport)
-		t.Proxy = func(_ *http.Request) (*url.URL, error) {
-			return p.proxy, nil
-		}
-
 		reverseProxy := reverseProxyPool.Get().(*httputil.ReverseProxy)
 		defer func() {
-			reverseProxy.Director = nil
+			reverseProxy.Rewrite = nil
 			reverseProxy.ModifyResponse = nil
 			reverseProxyPool.Put(reverseProxy)
 		}()
@@ -199,6 +193,8 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 			// req.Out.Header.Set("HOST", r.Host)
 			// req.Out.Header.Del("Accept-Encoding")
 		}
+
+		reverseProxy.Transport = HttpTransport()
 		reverseProxy.ServeHTTP(w, r)
 
 		// response, err := t.RoundTrip(r)
@@ -220,6 +216,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) Include() []string {
 	return p.include
 }
+
 func (p *Proxy) SetInclude(includes string) []string {
 	include := make([]string, 0)
 	for _, v := range strings.Split(includes, ";") {
@@ -232,13 +229,16 @@ func (p *Proxy) SetInclude(includes string) []string {
 	p.include = include
 	return p.include
 }
+
 func (p *Proxy) ClearInclude() []string {
 	p.include = make([]string, 0)
 	return p.include
 }
+
 func (p *Proxy) Exclude() []string {
 	return p.exclude
 }
+
 func (p *Proxy) SetExclude(excludes string) []string {
 	exclude := make([]string, 0)
 	for _, v := range strings.Split(excludes, ";") {
@@ -251,13 +251,16 @@ func (p *Proxy) SetExclude(excludes string) []string {
 	p.exclude = exclude
 	return p.exclude
 }
+
 func (p *Proxy) ClearExclude() []string {
 	p.exclude = make([]string, 0)
 	return p.exclude
 }
+
 func (p *Proxy) Replace() [][]string {
 	return p.replace
 }
+
 func (p *Proxy) SetReplace(replaces string) [][]string {
 	replace := make([][]string, 0)
 	for _, v := range strings.Split(replaces, ";") {
@@ -270,27 +273,46 @@ func (p *Proxy) SetReplace(replaces string) [][]string {
 	p.replace = replace
 	return p.replace
 }
+
 func (p *Proxy) ClearReplace() [][]string {
 	p.replace = make([][]string, 0)
 	return p.replace
 }
+
 func (p *Proxy) Proxy() string {
-	if p.proxy == nil {
-		return ""
+	return p.proxy
+}
+
+func (p *Proxy) SetProxy(uri string) {
+	p.proxy = uri
+	proxyFunc = func(_ *http.Request) (*url.URL, error) {
+		return url.Parse(uri)
 	}
-	return p.proxy.String()
 }
-func (p *Proxy) SetProxy(proxy string) string {
-	p.proxy, _ = url.Parse(proxy)
-	if p.proxy == nil {
-		return ""
+
+func (p *Proxy) ClearProxy() {
+	p.proxy = ""
+	proxyFunc = nil
+	return
+}
+
+func (p *Proxy) SetSocks5(addr string) {
+	p.socks5 = addr
+
+	// u, _ := url.Parse(socks5Proxy)
+	// p.socks5Dialer, _ = proxy.FromURL(u, proxy.Direct)
+	dialer, _ := proxy.SOCKS5("tcp", addr, nil, proxy.Direct)
+	socks5Func = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return dialer.Dial(network, addr)
 	}
-	return p.proxy.String()
+	return
 }
-func (p *Proxy) ClearProxy() string {
-	p.proxy = nil
-	return ""
+
+func (p *Proxy) ClearSocks5() {
+	p.socks5 = ""
+	socks5Func = nil
 }
+
 func (p *Proxy) Replay(message Message) {
 	r, err := http.NewRequest(message.Method, message.Url, strings.NewReader(message.ReqBody))
 	if err != nil {
@@ -306,14 +328,9 @@ func (p *Proxy) Replay(message Message) {
 	}
 	r.Body = io.NopCloser(bytes.NewBuffer(reqBody))
 
-	t := http.DefaultTransport.(*http.Transport)
-	if p.proxy != nil {
-		t.Proxy = func(_ *http.Request) (*url.URL, error) {
-			return p.proxy, nil
-		}
-	}
 	begin := time.Now()
-	response, err := t.RoundTrip(r)
+	tr := HttpTransport()
+	response, err := tr.RoundTrip(r)
 	spend := uint16(time.Since(begin).Milliseconds())
 	if err != nil {
 		return
@@ -493,46 +510,40 @@ func copyHeader(dst, src http.Header) {
 	}
 }
 
-func NewProxy(messageChan chan *Message, include string, exclude string, proxy string) (p *Proxy, err error) {
+func NewProxy(addr string, caCert, caKey []byte) (p *Proxy, err error) {
 	p = new(Proxy)
 	p.logger = slog.Default()
-	p.SetInclude(include)
-	p.SetExclude(exclude)
-	p.SetMessageChan(messageChan)
 
-	if P, err := url.Parse(proxy); err != nil {
-		p.proxy = P
+	{ // ca.cert
+		block, _ := pem.Decode(caCert)
+		if block == nil {
+			return
+		}
+
+		if p.rootCert, err = x509.ParseCertificate(block.Bytes); err != nil {
+			return
+		}
 	}
 
-	// ca.cert
-	block, _ := pem.Decode(static.CaCert)
-	if block == nil {
-		return
-	}
-	p.rootCert, err = x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return
-	}
+	{ // ca.key
+		block, _ := pem.Decode(caKey)
+		if block == nil {
+			return
+		}
 
-	// ca.key
-	block, _ = pem.Decode(static.CaKey)
-	if block == nil {
-		return
-	}
-
-	p.rootKey, err = x509.ParsePKCS1PrivateKey(block.Bytes)
-	if err != nil {
-		return
+		if p.rootKey, err = x509.ParsePKCS1PrivateKey(block.Bytes); err != nil {
+			return
+		}
 	}
 
 	// server.key
-	p.privateKey, err = rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
+	if p.privateKey, err = rsa.GenerateKey(rand.Reader, 2048); err != nil {
 		return
 	}
 
 	p.listener, _ = NewListener()
-	p.srv = &http.Server{
+
+	p.httpsSrv = &http.Server{
 		Handler: p,
 		TLSConfig: &tls.Config{
 			GetCertificate: func(info *tls.ClientHelloInfo) (*tls.Certificate, error) {
@@ -540,8 +551,32 @@ func NewProxy(messageChan chan *Message, include string, exclude string, proxy s
 			},
 		},
 	}
-	go func() {
-		_ = p.start()
-	}()
+
+	p.httpSrv = &http.Server{
+		Addr:         addr,
+		Handler:      p,
+		TLSNextProto: make(map[string]func(*http.Server, *tls.Conn, http.Handler)),
+	}
 	return
+}
+
+func (p *Proxy) Start() {
+	p.wg.Add(2)
+	go func() {
+		defer p.wg.Done()
+		p.httpsSrv.ServeTLS(p.listener, "", "")
+	}()
+
+	go func() {
+		defer p.wg.Done()
+		p.httpSrv.ListenAndServe()
+	}()
+
+}
+
+func (p *Proxy) Stop() {
+	p.httpsSrv.Close()
+	p.httpSrv.Close()
+
+	p.wg.Wait()
 }
