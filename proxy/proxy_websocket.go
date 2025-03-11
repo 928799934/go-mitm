@@ -90,7 +90,6 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	clientConn, err := wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
-		fmt.Println("websocket return2", r.URL.String())
 		return
 	}
 	defer clientConn.Close()
@@ -115,11 +114,8 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			copyHeader(w.Header(), resp.Header)
 			w.WriteHeader(resp.StatusCode)
 		} else {
-			fmt.Println("dialer.Dial err:", err.Error(), uri)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
-
-		fmt.Println("websocket return1", r.URL.String())
 		return
 	}
 	defer targetConn.Close()
@@ -139,29 +135,22 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	look := false
-	// look = strings.Contains(uri, "")
-
 	var g sync.WaitGroup
 	g.Add(2)
 	go func() {
 		defer g.Done()
-		if err := p.proxyWebSocket(targetConn, clientConn, "up", look); err != nil {
-			fmt.Printf("uri(%v) up message error(%v)\n", uri, err)
-		}
+		p.proxyWebSocket(targetConn, clientConn)
 	}()
 
 	go func() {
 		defer g.Done()
-		if err := p.proxyWebSocket(clientConn, targetConn, "down", look); err != nil {
-			fmt.Printf("uri(%v) down message error(%v)\n", uri, err)
-		}
+		p.proxyWebSocket(clientConn, targetConn)
 	}()
 	g.Wait()
 }
 
 // 新增：转发 WebSocket 消息
-func (p *Proxy) proxyWebSocket(dst, src *websocket.Conn, ft string, look bool) error {
+func (p *Proxy) proxyWebSocket(dst, src *websocket.Conn) error {
 	for {
 		messageType, message, err := src.ReadMessage()
 		if err != nil {
@@ -169,10 +158,6 @@ func (p *Proxy) proxyWebSocket(dst, src *websocket.Conn, ft string, look bool) e
 				return nil
 			}
 			return err
-		}
-
-		if look {
-			fmt.Println(ft, messageType, string(message))
 		}
 
 		err = dst.WriteMessage(messageType, message)
