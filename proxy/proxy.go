@@ -60,6 +60,7 @@ var cipherSuiteMap = map[uint16]string{
 var (
 	proxyFunc  func(*http.Request) (*url.URL, error)
 	socks5Func func(ctx context.Context, network, addr string) (net.Conn, error)
+	hookFunc   func(*url.URL, []byte) []byte
 )
 
 type Proxy struct {
@@ -293,7 +294,6 @@ func (p *Proxy) SetProxy(uri string) {
 func (p *Proxy) ClearProxy() {
 	p.proxy = ""
 	proxyFunc = nil
-	return
 }
 
 func (p *Proxy) SetSocks5(addr string) {
@@ -305,12 +305,20 @@ func (p *Proxy) SetSocks5(addr string) {
 	socks5Func = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		return dialer.Dial(network, addr)
 	}
-	return
 }
 
 func (p *Proxy) ClearSocks5() {
 	p.socks5 = ""
 	socks5Func = nil
+}
+
+// hookFunc   func(*url.URL, []byte) []byte
+func (p *Proxy) SetHook(hook func(*url.URL, []byte) []byte) {
+	hookFunc = hook
+}
+
+func (p *Proxy) ClearHook() {
+	hookFunc = nil
 }
 
 func (p *Proxy) Replay(message Message) {

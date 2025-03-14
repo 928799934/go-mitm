@@ -178,6 +178,11 @@ func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
 			return err
 		}
 
+		// 拦截修改数据
+		if hookFunc != nil {
+			responseData = hookFunc(r.URL, responseData)
+		}
+
 		size = int64(len(responseData))
 
 		if len(responseData) > 0 {

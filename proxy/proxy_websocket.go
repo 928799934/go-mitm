@@ -139,18 +139,18 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	g.Add(2)
 	go func() {
 		defer g.Done()
-		p.proxyWebSocket(targetConn, clientConn)
+		p.proxyWebSocket(targetConn, clientConn, nil)
 	}()
 
 	go func() {
 		defer g.Done()
-		p.proxyWebSocket(clientConn, targetConn)
+		p.proxyWebSocket(clientConn, targetConn, r.URL)
 	}()
 	g.Wait()
 }
 
 // 新增：转发 WebSocket 消息
-func (p *Proxy) proxyWebSocket(dst, src *websocket.Conn) error {
+func (p *Proxy) proxyWebSocket(dst, src *websocket.Conn, url *url.URL) error {
 	for {
 		messageType, message, err := src.ReadMessage()
 		if err != nil {
@@ -158,6 +158,10 @@ func (p *Proxy) proxyWebSocket(dst, src *websocket.Conn) error {
 				return nil
 			}
 			return err
+		}
+
+		if hookFunc != nil && url != nil {
+			message = hookFunc(url, message)
 		}
 
 		err = dst.WriteMessage(messageType, message)
