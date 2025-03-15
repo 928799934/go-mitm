@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"os"
@@ -20,10 +19,10 @@ import (
 var (
 	tr = &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
+		// DialContext: (&net.Dialer{
+		// 	Timeout:   30 * time.Second,
+		// 	KeepAlive: 30 * time.Second,
+		// }).DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
@@ -43,22 +42,15 @@ func HttpTransport() http.RoundTripper {
 	if socks5Func != nil && tr.DialContext == nil {
 		tr.DialContext = socks5Func
 	}
-
 	if socks5Func == nil && tr.DialContext != nil {
-		tr.DialContext = (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext
+		tr.DialContext = nil
 	}
-
 	if proxyFunc != nil && tr.Proxy == nil {
 		tr.Proxy = proxyFunc
 	}
-
 	if proxyFunc == nil && tr.Proxy != nil {
 		tr.Proxy = nil
 	}
-
 	return tr
 }
 

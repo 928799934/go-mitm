@@ -27,7 +27,30 @@ var (
 	}
 )
 
-func WebSocketDialer() *websocket.Dialer {
+type WebSocket websocket.Dialer
+
+func (ws *WebSocket) Dialer() *websocket.Dialer {
+	return (*websocket.Dialer)(ws)
+}
+
+func (ws *WebSocket) Clone() *WebSocket {
+	return &WebSocket{
+		Proxy:             ws.Proxy,
+		HandshakeTimeout:  ws.HandshakeTimeout,
+		EnableCompression: ws.EnableCompression,
+		TLSClientConfig:   ws.TLSClientConfig,
+		NetDialContext:    ws.NetDialContext,
+		NetDial:           ws.NetDial,
+		NetDialTLSContext: ws.NetDialTLSContext,
+		ReadBufferSize:    ws.ReadBufferSize,
+		WriteBufferSize:   ws.WriteBufferSize,
+		WriteBufferPool:   ws.WriteBufferPool,
+		Subprotocols:      ws.Subprotocols,
+		Jar:               ws.Jar,
+	}
+}
+
+func WebSocketDialer() *WebSocket {
 	if socks5Func != nil && dialer.NetDialContext == nil {
 		dialer.NetDialContext = socks5Func
 	}
@@ -43,7 +66,7 @@ func WebSocketDialer() *websocket.Dialer {
 	if proxyFunc == nil && dialer.Proxy != nil {
 		dialer.Proxy = nil
 	}
-	return dialer
+	return (*WebSocket)(dialer)
 }
 
 // 新增：处理 WebSocket 连接
@@ -95,7 +118,7 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer clientConn.Close()
 
 	// 连接目标 WebSocket 服务器
-	dialer := WebSocketDialer()
+	dialer := WebSocketDialer().Dialer()
 	// dialer := &websocket.Dialer{
 	// 	// Proxy:             http.ProxyFromEnvironment,
 	// 	HandshakeTimeout:  45 * time.Second,
