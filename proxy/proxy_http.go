@@ -101,10 +101,7 @@ func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
 	reverseProxy.Rewrite = func(req *httputil.ProxyRequest) {
 		begin = time.Now()
 		req.Out.Header.Set("HOST", r.Host)
-		// 对于流式传输，保留原始的 Accept-Encoding
-		if !isStreamResponse(r.Header) {
-			req.Out.Header.Del("Accept-Encoding")
-		}
+		req.Out.Header.Del("Accept-Encoding")
 	}
 
 	// tr := http.DefaultTransport.(*http.Transport)
@@ -135,30 +132,6 @@ func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
 		for _, v := range resp.Cookies() {
 			respCookie[v.Name] = v.Value
 		}
-
-		// 检查是否为流式响应
-		if isStreamResponse(resp.Header) {
-			// 对于流式响应，直接返回，不修改 body
-			if p.messageChan != nil {
-				p.messageChan <- &Message{
-					Url:        r.URL.String(),
-					RemoteAddr: r.RemoteAddr,
-					Method:     r.Method,
-					Type:       getContentType(resp.Header),
-					Time:       spend,
-					Status:     uint16(resp.StatusCode),
-					ReqHeader:  reqHeader,
-					ReqCookie:  reqCookie,
-					ReqBody:    reqBody.String(),
-					RespHeader: respHeader,
-					RespCookie: respCookie,
-					RespTls:    getTLSInfo(resp.TLS, r.TLS),
-				}
-			}
-			return nil
-		}
-
-		// 非流式响应的处理保持不变
 
 		respBody := new(bytes.Buffer)
 
@@ -214,24 +187,11 @@ func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
 	reverseProxy.ServeHTTP(rw, r)
 }
 
-// 新增：检查是否为流式响应
-func isStreamResponse(header http.Header) bool {
-	// 检查 WebSocket
-	if strings.ToLower(header.Get("Connection")) == "upgrade" &&
-		strings.ToLower(header.Get("Upgrade")) == "websocket" {
-		return true
-	}
-
-	// 检查 Transfer-Encoding
-	if header.Get("Transfer-Encoding") == "chunked" {
-		return true
-	}
-
-	// 检查 Content-Type
-	contentType := header.Get("Content-Type")
-	return strings.Contains(contentType, "text/event-stream") ||
-		strings.Contains(contentType, "application/x-ndjson") ||
-		strings.Contains(contentType, "multipart/x-mixed-replace")
+func isSSERequest(r *http.Request) bool {
+	contentType := r.Header.Get("Content-Type")
+	return strings.Contains(strings.ToLower(contentType), "text/event-stream") ||
+		strings.Contains(strings.ToLower(contentType), "application/x-ndjson") ||
+		strings.Contains(strings.ToLower(contentType), "multipart/x-mixed-replace")
 }
 
 // 新增：提取 Content-Type
@@ -313,6 +273,11 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 检查是否为 WebSocket 请求
 	if isWebSocketRequest(r) {
 		p.handleWebSocket(w, r)
+		return
+	}
+
+	if isSSERequest(r) {
+		p.handleSSE(w, r)
 		return
 	}
 
