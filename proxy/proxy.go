@@ -285,6 +285,9 @@ func (p *Proxy) Proxy() string {
 }
 
 func (p *Proxy) SetProxy(uri string) {
+	if uri == "" {
+		return
+	}
 	p.proxy = uri
 	proxyFunc = func(_ *http.Request) (*url.URL, error) {
 		return url.Parse(uri)
@@ -297,6 +300,10 @@ func (p *Proxy) ClearProxy() {
 }
 
 func (p *Proxy) SetSocks5(addr string) {
+	if addr == "" {
+		return
+	}
+
 	p.socks5 = addr
 
 	// u, _ := url.Parse(socks5Proxy)

@@ -51,6 +51,7 @@ func HttpTransport() http.RoundTripper {
 	if proxyFunc == nil && tr.Proxy != nil {
 		tr.Proxy = nil
 	}
+
 	return tr
 }
 

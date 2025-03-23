@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"strings"
 	"sync"
@@ -14,18 +15,25 @@ import (
 
 var (
 	dialer = &websocket.Dialer{
-		Proxy:             http.ProxyFromEnvironment,
-		HandshakeTimeout:  45 * time.Second,
-		EnableCompression: true,
-		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
+		Proxy:            http.ProxyFromEnvironment,
+		HandshakeTimeout: 45 * time.Second,
+		// EnableCompression: true,
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		Jar:             cookieJar(),
 	}
 	// 添加 WebSocket upgrader
 	wsUpgrader = websocket.Upgrader{
+		// EnableCompression: true,
 		CheckOrigin: func(r *http.Request) bool {
 			return true
 		},
 	}
 )
+
+func cookieJar() http.CookieJar {
+	jar, _ := cookiejar.New(nil)
+	return jar
+}
 
 type WebSocket websocket.Dialer
 
@@ -71,7 +79,6 @@ func WebSocketDialer() *WebSocket {
 
 // 新增：处理 WebSocket 连接
 func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-
 	// 复制原始请求头
 	header := make(http.Header)
 	for k, v := range r.Header {
@@ -105,17 +112,10 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	uri := fmt.Sprintf("%s://%s%s", targetURL.Scheme, targetURL.Host, targetURL.Path)
+
 	if querys := targetURL.Query(); len(querys) > 0 {
 		uri += "?" + querys.Encode()
 	}
-
-	// 升级客户端连接为 WebSocket
-	clientConn, err := wsUpgrader.Upgrade(w, r, nil)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer clientConn.Close()
 
 	// 连接目标 WebSocket 服务器
 	dialer := WebSocketDialer().Dialer()
@@ -143,6 +143,21 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	defer targetConn.Close()
 
+	upgradeHeader := http.Header{}
+	upgradeHeader.Add("Sec-WebSocket-Protocol", r.Header.Get("Sec-WebSocket-Protocol"))
+
+	for _, v := range dialer.Jar.Cookies(r.URL) {
+		upgradeHeader.Add("Set-Cookie", v.String())
+	}
+
+	// 升级客户端连接为 WebSocket
+	clientConn, err := wsUpgrader.Upgrade(w, r, upgradeHeader)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer clientConn.Close()
+
 	// 记录 WebSocket 连接信息
 	if p.messageChan != nil {
 		p.messageChan <- &Message{
@@ -162,18 +177,19 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	g.Add(2)
 	go func() {
 		defer g.Done()
-		p.proxyWebSocket(targetConn, clientConn, nil)
+		p.proxyWebSocket(clientConn, targetConn, nil)
 	}()
 
 	go func() {
 		defer g.Done()
-		p.proxyWebSocket(clientConn, targetConn, r.URL)
+		p.proxyWebSocket(targetConn, clientConn, r.URL)
 	}()
 	g.Wait()
 }
 
 // 新增：转发 WebSocket 消息
 func (p *Proxy) proxyWebSocket(dst, src *websocket.Conn, url *url.URL) error {
+
 	for {
 		messageType, message, err := src.ReadMessage()
 		if err != nil {
