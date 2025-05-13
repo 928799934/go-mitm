@@ -66,7 +66,10 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 		// 获取一行数据
 		data := scanner.Bytes()
 
-		// 处理数据（可以在这里添加数据修改逻辑） line 内部包含 \n 了
+		// 追加换行符
+		data = append(data, '\n')
+
+		// 处理数据（可以在这里添加数据修改逻辑）
 		if hookFunc != nil {
 			data = hookFunc(r.URL, data)
 		}
