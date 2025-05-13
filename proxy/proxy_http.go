@@ -189,10 +189,12 @@ func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
 }
 
 func isSSERequest(r *http.Request) bool {
+	accept := r.Header.Get("Accept")
 	contentType := r.Header.Get("Content-Type")
 	return strings.Contains(strings.ToLower(contentType), "text/event-stream") ||
 		strings.Contains(strings.ToLower(contentType), "application/x-ndjson") ||
-		strings.Contains(strings.ToLower(contentType), "multipart/x-mixed-replace")
+		strings.Contains(strings.ToLower(contentType), "multipart/x-mixed-replace") ||
+		strings.Contains(strings.ToLower(accept), "text/event-stream")
 }
 
 // 新增：提取 Content-Type
@@ -270,7 +272,6 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.handleHttps(w, r)
 		return
 	}
-
 	// 检查是否为 WebSocket 请求
 	if isWebSocketRequest(r) {
 		p.handleWebSocket(w, r)

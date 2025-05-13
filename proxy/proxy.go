@@ -498,21 +498,23 @@ func (p *Proxy) Replay(message Message) {
 
 		//p.logger.Info("Response", "StatusCode", response.StatusCode, r.Method, r.URL.String(), "contentType", contentType)
 
-		p.messageChan <- &Message{
-			Url:        r.URL.String(),
-			RemoteAddr: r.RemoteAddr,
-			Method:     r.Method,
-			Type:       contentType,
-			Time:       spend,
-			Size:       uint16(size),
-			Status:     uint16(response.StatusCode),
-			ReqHeader:  reqHeader,
-			ReqCookie:  reqCookie,
-			ReqBody:    string(reqBody),
-			RespHeader: respHeader,
-			RespCookie: respCookie,
-			RespBody:   respBody,
-			RespTls:    respTls,
+		if p.messageChan != nil {
+			p.messageChan <- &Message{
+				Url:        r.URL.String(),
+				RemoteAddr: r.RemoteAddr,
+				Method:     r.Method,
+				Type:       contentType,
+				Time:       spend,
+				Size:       uint16(size),
+				Status:     uint16(response.StatusCode),
+				ReqHeader:  reqHeader,
+				ReqCookie:  reqCookie,
+				ReqBody:    string(reqBody),
+				RespHeader: respHeader,
+				RespCookie: respCookie,
+				RespBody:   respBody,
+				RespTls:    respTls,
+			}
 		}
 	}(r, response)
 }
