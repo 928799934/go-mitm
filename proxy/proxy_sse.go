@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"io"
 	"net/http"
 )
@@ -15,6 +16,9 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 		r.URL.Host = r.Host
 	}
 
+	reqBody := new(bytes.Buffer)
+
+	r.Body = io.NopCloser(io.TeeReader(r.Body, reqBody))
 	// 创建到目标服务器的请求
 	req, err := http.NewRequest(r.Method, r.URL.String(), r.Body)
 	if err != nil {
@@ -48,16 +52,23 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
+	var msg *Message
 	// 记录SSE连接信息
 	if p.messageChan != nil {
-		p.messageChan <- &Message{
-			Url:        r.URL.String(),
-			RemoteAddr: r.RemoteAddr,
-			Method:     r.Method,
-			Type:       "text/event-stream",
-			Status:     uint16(resp.StatusCode),
-			ReqHeader:  map[string]string{"Accept": r.Header.Get("Accept")},
+		msg = &Message{
+			Url:          r.URL.String(),
+			RemoteAddr:   r.RemoteAddr,
+			Method:       r.Method,
+			ReqBody:      reqBody.String(),
+			Type:         "text/event-stream",
+			Status:       uint16(resp.StatusCode),
+			ReqHeader:    map[string]string{"Accept": r.Header.Get("Accept")},
+			RespBodyChan: make(chan []byte, 10),
 		}
+
+		defer close(msg.RespBodyChan)
+
+		p.messageChan <- msg
 	}
 
 	// 从目标服务器读取SSE事件并按行转发到客户端
@@ -70,15 +81,19 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 		data = append(data, '\n')
 
 		// 处理数据（可以在这里添加数据修改逻辑）
-		if hookFunc != nil {
-			data = hookFunc(r.URL, data)
-		}
+		// if hookFunc != nil {
+		// 	data = hookFunc(r.URL, data)
+		// }
 
 		// 发送数据到客户端
 		if _, err = w.Write(data); err != nil {
 			break
 		}
 		flusher.Flush()
+
+		if msg != nil {
+			msg.RespBodyChan <- data
+		}
 	}
 
 	// 处理扫描过程中的错误
