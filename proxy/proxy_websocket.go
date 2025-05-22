@@ -159,8 +159,9 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer clientConn.Close()
 
 	// 记录 WebSocket 连接信息
+	var msg *Message
 	if p.messageChan != nil {
-		p.messageChan <- &Message{
+		msg = &Message{
 			Url:        r.URL.String(),
 			RemoteAddr: r.RemoteAddr,
 			Method:     r.Method,
@@ -170,25 +171,29 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				"Upgrade":    r.Header.Get("Upgrade"),
 				"Connection": r.Header.Get("Connection"),
 			},
+			RespBodyChan: make(chan []byte, 10),
 		}
+		defer close(msg.RespBodyChan)
+
+		p.messageChan <- msg
 	}
 
 	var g sync.WaitGroup
 	g.Add(2)
 	go func() {
 		defer g.Done()
-		p.proxyWebSocket(clientConn, targetConn, nil)
+		p.proxyWebSocket(clientConn, targetConn, msg)
 	}()
 
 	go func() {
 		defer g.Done()
-		p.proxyWebSocket(targetConn, clientConn, r.URL)
+		p.proxyWebSocket(targetConn, clientConn, nil)
 	}()
 	g.Wait()
 }
 
 // 新增：转发 WebSocket 消息
-func (p *Proxy) proxyWebSocket(dst, src *websocket.Conn, url *url.URL) error {
+func (p *Proxy) proxyWebSocket(dst, src *websocket.Conn, msg *Message) error {
 
 	for {
 		messageType, message, err := src.ReadMessage()
@@ -199,9 +204,9 @@ func (p *Proxy) proxyWebSocket(dst, src *websocket.Conn, url *url.URL) error {
 			return err
 		}
 
-		if hookFunc != nil && url != nil {
-			message = hookFunc(url, message)
-		}
+		// if hookFunc != nil && url != nil {
+		// 	message = hookFunc(url, message)
+		// }
 
 		err = dst.WriteMessage(messageType, message)
 		if err != nil {
@@ -209,6 +214,10 @@ func (p *Proxy) proxyWebSocket(dst, src *websocket.Conn, url *url.URL) error {
 				return nil
 			}
 			return err
+		}
+
+		if msg != nil {
+			msg.RespBodyChan <- message
 		}
 
 		// 记录 WebSocket 消息
