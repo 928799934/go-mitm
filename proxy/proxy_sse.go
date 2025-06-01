@@ -63,7 +63,7 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 			Type:         "text/event-stream",
 			Status:       uint16(resp.StatusCode),
 			ReqHeader:    map[string]string{"Accept": r.Header.Get("Accept")},
-			RespBodyChan: make(chan []byte, 10),
+			RespBodyChan: make(chan []byte, 10240),
 		}
 
 		defer close(msg.RespBodyChan)
@@ -79,11 +79,6 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 		// 追加换行符
 		data = append(data, '\n')
-
-		// 处理数据（可以在这里添加数据修改逻辑）
-		// if hookFunc != nil {
-		// 	data = hookFunc(r.URL, data)
-		// }
 
 		// 发送数据到客户端
 		if _, err = w.Write(data); err != nil {

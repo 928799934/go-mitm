@@ -119,17 +119,6 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	// 连接目标 WebSocket 服务器
 	dialer := WebSocketDialer().Dialer()
-	// dialer := &websocket.Dialer{
-	// 	// Proxy:             http.ProxyFromEnvironment,
-	// 	HandshakeTimeout:  45 * time.Second,
-	// 	EnableCompression: true,
-	// 	TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
-	// }
-
-	// dialer.Proxy = func(_ *http.Request) (*url.URL, error) {
-	// 	return p.proxy, nil
-	// 	// return url.Parse("http://127.0.0.1:1080")
-	// }
 
 	targetConn, resp, err := dialer.Dial(uri, header)
 	if err != nil {
@@ -171,7 +160,7 @@ func (p *Proxy) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 				"Upgrade":    r.Header.Get("Upgrade"),
 				"Connection": r.Header.Get("Connection"),
 			},
-			RespBodyChan: make(chan []byte, 10),
+			RespBodyChan: make(chan []byte, 10240),
 		}
 		defer close(msg.RespBodyChan)
 
@@ -204,10 +193,6 @@ func (p *Proxy) proxyWebSocket(dst, src *websocket.Conn, msg *Message) error {
 			return err
 		}
 
-		// if hookFunc != nil && url != nil {
-		// 	message = hookFunc(url, message)
-		// }
-
 		err = dst.WriteMessage(messageType, message)
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseGoingAway) {
@@ -219,15 +204,6 @@ func (p *Proxy) proxyWebSocket(dst, src *websocket.Conn, msg *Message) error {
 		if msg != nil {
 			msg.RespBodyChan <- message
 		}
-
-		// 记录 WebSocket 消息
-		// if p.messageChan != nil {
-		// 	p.messageChan <- &Message{
-		// 		Type:     "websocket_message",
-		// 		ReqBody:  string(message),
-		// 		RespBody: fmt.Sprintf("WebSocket message type: %d", messageType),
-		// 	}
-		// }
 	}
 }
 
