@@ -35,6 +35,11 @@ func (p *Proxy) handleSSE(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
+	if origin := req.Header.Get("Origin"); origin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+	}
+
 	// 将上游 SSE 数据流转发给客户端
 	flusher, ok := w.(http.Flusher)
 	if !ok {
