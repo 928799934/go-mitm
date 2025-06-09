@@ -71,6 +71,7 @@ type Proxy struct {
 	listener     *Listener
 	proxy        string
 	socks5       string
+	disableGZIP  bool
 	httpSrv      *http.Server
 	httpsSrv     *http.Server
 	serialNumber int64
@@ -326,6 +327,10 @@ func (p *Proxy) SetHook(hook func(*url.URL, []byte) []byte) {
 
 func (p *Proxy) ClearHook() {
 	hookFunc = nil
+}
+
+func (p *Proxy) DisableGZIP() {
+	p.disableGZIP = true
 }
 
 func (p *Proxy) Replay(message Message) {

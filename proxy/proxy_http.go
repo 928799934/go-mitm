@@ -90,6 +90,10 @@ func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
 	acceptEncoding := strings.Split(r.Header.Get("Accept-Encoding"), ",")
 	_, bGZIP := dealWithGZIP(acceptEncoding)
 
+	if p.disableGZIP {
+		bGZIP = false
+	}
+
 	// 获取 代理资源
 	reverseProxy := reverseProxyPool.Get().(*httputil.ReverseProxy)
 	defer func() {
