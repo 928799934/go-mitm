@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/andybalholm/brotli"
+	tlsutls "github.com/refraction-networking/utls"
 	"golang.org/x/net/proxy"
 )
 
@@ -58,9 +59,10 @@ var cipherSuiteMap = map[uint16]string{
 }
 
 var (
-	proxyFunc  func(*http.Request) (*url.URL, error)
-	socks5Func func(ctx context.Context, network, addr string) (net.Conn, error)
-	hookFunc   func(*url.URL, []byte) []byte
+	proxyFunc     func(*http.Request) (*url.URL, error)
+	socks5Func    func(ctx context.Context, network, addr string) (net.Conn, error)
+	socks5TLSFunc func(ctx context.Context, network, addr string) (net.Conn, error)
+	hookFunc      func(*url.URL, []byte) []byte
 )
 
 type Proxy struct {
@@ -80,14 +82,20 @@ type Proxy struct {
 	include      []string
 	replace      [][]string
 	logger       *slog.Logger
+	certCache    sync.Map
 }
 
 func (p *Proxy) SetMessageChan(messageChan chan *Message) {
 	p.messageChan = messageChan
 }
 
-func (p *Proxy) getCertificate(domain string) (cert *tls.Certificate, err error) {
+func (p *Proxy) getCertificate(domain string) (*tls.Certificate, error) {
+	if cert, ok := p.certCache.Load(domain); ok {
+		return cert.(*tls.Certificate), nil
+	}
+
 	atomic.AddInt64(&p.serialNumber, 1)
+
 	serverTemplate := &x509.Certificate{
 		SerialNumber: big.NewInt(p.serialNumber),
 		Subject: pkix.Name{
@@ -95,23 +103,37 @@ func (p *Proxy) getCertificate(domain string) (cert *tls.Certificate, err error)
 		},
 		NotBefore: time.Now().AddDate(0, 0, -1),
 		NotAfter:  time.Now().AddDate(1, 0, 0),
+		KeyUsage:  x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage: []x509.ExtKeyUsage{
+			x509.ExtKeyUsageServerAuth,
+		},
 	}
-	ip := net.ParseIP(domain)
-	if ip != nil {
+
+	if ip := net.ParseIP(domain); ip != nil {
 		serverTemplate.IPAddresses = []net.IP{ip}
 	} else {
 		serverTemplate.DNSNames = []string{domain}
 	}
-	certBytes, err := x509.CreateCertificate(rand.Reader, serverTemplate, p.rootCert, &p.privateKey.PublicKey, p.rootKey)
+
+	// ⚠️ 每个证书都应有自己独立的密钥对
+	serverKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
-		return
+		return nil, err
 	}
 
-	cert = &tls.Certificate{
-		PrivateKey:  p.privateKey,
-		Certificate: [][]byte{certBytes},
+	certBytes, err := x509.CreateCertificate(rand.Reader, serverTemplate, p.rootCert, &serverKey.PublicKey, p.rootKey)
+	if err != nil {
+		return nil, err
 	}
-	return
+
+	cert := &tls.Certificate{
+		Certificate: [][]byte{certBytes},
+		PrivateKey:  serverKey,
+	}
+
+	p.certCache.Store(domain, cert)
+
+	return cert, nil
 }
 
 func (p *Proxy) doReplace1(w http.ResponseWriter, r *http.Request) {
@@ -310,8 +332,37 @@ func (p *Proxy) SetSocks5(addr string) {
 	// u, _ := url.Parse(socks5Proxy)
 	// p.socks5Dialer, _ = proxy.FromURL(u, proxy.Direct)
 	dialer, _ := proxy.SOCKS5("tcp", addr, nil, proxy.Direct)
-	socks5Func = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return dialer.Dial(network, addr)
+	socks5Func = func(_ context.Context, network, addr string) (net.Conn, error) {
+		conn, err := dialer.Dial(network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return conn, nil
+	}
+
+	socks5TLSFunc = func(_ context.Context, network, addr string) (net.Conn, error) {
+		conn, err := dialer.Dial(network, addr)
+		if err != nil {
+			return nil, err
+		}
+
+		hostname, _, _ := net.SplitHostPort(addr)
+
+		config := &tlsutls.Config{
+			ServerName:         hostname,
+			InsecureSkipVerify: true,
+		}
+
+		uTlsConn := tlsutls.UClient(conn, config, tlsutls.HelloCustom)
+		spec, _ := tlsutls.UTLSIdToSpec(tlsutls.HelloRandomizedNoALPN)
+		spec.Extensions = append(spec.Extensions, &tlsutls.ALPNExtension{AlpnProtocols: []string{"http/1.1"}})
+		if err := uTlsConn.ApplyPreset(&spec); err != nil {
+			return nil, fmt.Errorf("ApplyPreset failed: %w", err)
+		}
+		if err := uTlsConn.Handshake(); err != nil {
+			return nil, fmt.Errorf("TLS handshake failed: %w", err)
+		}
+		return uTlsConn, nil
 	}
 }
 

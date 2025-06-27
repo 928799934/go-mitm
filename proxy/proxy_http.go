@@ -2,10 +2,13 @@ package proxy
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"os"
@@ -14,21 +17,26 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/andybalholm/brotli"
 )
 
 var (
 	tr = &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		// Proxy: http.ProxyFromEnvironment,
+
 		// DialContext: (&net.Dialer{
 		// 	Timeout:   30 * time.Second,
 		// 	KeepAlive: 30 * time.Second,
 		// }).DialContext,
-		ForceAttemptHTTP2:     true,
+		// ForceAttemptHTTP2:     true,
+
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
 		TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
+		DisableCompression:    true,
 	}
 
 	reverseProxyPool = &sync.Pool{
@@ -41,18 +49,62 @@ var (
 func HttpTransport() http.RoundTripper {
 	if socks5Func != nil && tr.DialContext == nil {
 		tr.DialContext = socks5Func
+		tr.DialTLSContext = socks5TLSFunc
 	}
 	if socks5Func == nil && tr.DialContext != nil {
 		tr.DialContext = nil
+		tr.DialTLSContext = nil
 	}
+
 	if proxyFunc != nil && tr.Proxy == nil {
 		tr.Proxy = proxyFunc
 	}
 	if proxyFunc == nil && tr.Proxy != nil {
 		tr.Proxy = nil
 	}
-
 	return tr
+
+	// spec := &tlsutls.ClientHelloSpec{
+	// 	TLSVersMin: tls.VersionTLS12,
+	// 	TLSVersMax: tls.VersionTLS13,
+	// 	CipherSuites: []uint16{
+	// 		tls.TLS_AES_128_GCM_SHA256, // TLS 1.3
+	// 		tls.TLS_AES_256_GCM_SHA384, // TLS 1.3
+	// 		tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+	// 		tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+	// 	},
+	// 	Extensions: []tlsutls.TLSExtension{
+	// 		&tlsutls.SNIExtension{},
+	// 		&tlsutls.SupportedCurvesExtension{Curves: []tlsutls.CurveID{tlsutls.GREASE_PLACEHOLDER, tlsutls.X25519, tlsutls.CurveP256}},
+	// 		&tlsutls.SupportedPointsExtension{SupportedPoints: []byte{0}},
+	// 		&tlsutls.SignatureAlgorithmsExtension{
+	// 			SupportedSignatureAlgorithms: []tlsutls.SignatureScheme{
+	// 				tlsutls.ECDSAWithP256AndSHA256,
+	// 				tlsutls.PSSWithSHA256,
+	// 				tlsutls.PKCS1WithSHA256,
+	// 			},
+	// 		},
+	// 		&tlsutls.SupportedVersionsExtension{
+	// 			Versions: []uint16{tls.VersionTLS13, tls.VersionTLS12},
+	// 		},
+	// 		&tlsutls.ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}},
+	// 		&tlsutls.StatusRequestExtension{},
+	// 		&tlsutls.UtlsExtendedMasterSecretExtension{},
+	// 	},
+	// }
+
+	// spec, _ := tlsutls.UTLSIdToSpec(tlsutls.HelloRandomized)
+	// for i, ext := range spec.Extensions {
+	// 	if _, ok := ext.(*tlsutls.ALPNExtension); ok {
+	// 		spec.Extensions[i] = &tlsutls.ALPNExtension{AlpnProtocols: []string{"http/1.1"}}
+	// 	}
+	// }
+
+	// return &UTLSTransport{
+	// 	Socks5Addr: "127.0.0.1:10808",
+	// 	Spec:       &spec,
+	// 	Timeout:    10 * time.Second,
+	// }
 }
 
 func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
@@ -77,15 +129,6 @@ func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
 
 	r.Body = io.NopCloser(io.TeeReader(r.Body, reqBody))
 
-	reqTls := make(map[string]string)
-	if r.TLS != nil {
-		reqTls["ServerName"] = r.TLS.ServerName
-		reqTls["NegotiatedProtocol"] = r.TLS.NegotiatedProtocol
-		reqTls["Version"] = fmt.Sprintf("%d", r.TLS.Version)
-		reqTls["Unique"] = string(r.TLS.TLSUnique)
-		reqTls["CipherSuite"] = cipherSuiteMap[r.TLS.CipherSuite]
-	}
-
 	// 识别 gzip
 	acceptEncoding := strings.Split(r.Header.Get("Accept-Encoding"), ",")
 	_, bGZIP := dealWithGZIP(acceptEncoding)
@@ -98,15 +141,31 @@ func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
 	reverseProxy := reverseProxyPool.Get().(*httputil.ReverseProxy)
 	defer func() {
 		reverseProxy.Rewrite = nil
+		reverseProxy.Director = nil
 		reverseProxy.ModifyResponse = nil
 		reverseProxyPool.Put(reverseProxy)
 	}()
 
 	var begin time.Time
+
+	// reverseProxy.Director = func(r *http.Request) {
+	// 	begin = time.Now()
+	// 	r.Header.Set("HOST", r.Host)
+	// 	r.Header.Del("Accept-Encoding")
+	// 	r.Header.Set("Proxy-Connection", "close")
+	// 	// var cookies []string
+	// 	// for _, v := range r.Cookies() {
+	// 	// 	cookies = append(cookies, v.Name+"="+v.Value)
+	// 	// }
+	// 	// sort.Strings(cookies)
+	// 	// r.Header.Set("cookie", strings.Join(cookies, "; "))
+	// }
+
 	reverseProxy.Rewrite = func(req *httputil.ProxyRequest) {
 		begin = time.Now()
 		req.Out.Header.Set("HOST", r.Host)
 		req.Out.Header.Del("Accept-Encoding")
+		req.Out.Header.Set("Connection", "close")
 	}
 
 	// tr := http.DefaultTransport.(*http.Transport)
@@ -121,7 +180,7 @@ func (p *Proxy) doRequest(rw http.ResponseWriter, r *http.Request) {
 	reverseProxy.Transport = HttpTransport()
 
 	reverseProxy.ErrorHandler = func(resp http.ResponseWriter, req *http.Request, err error) {
-		// fmt.Printf("ErrorHandler url(%v) error(%v)\n", req.URL.String(), err)
+		fmt.Printf("ErrorHandler url(%v) error(%v)\n", req.URL.String(), err)
 	}
 
 	reverseProxy.ModifyResponse = func(resp *http.Response) error {
@@ -245,6 +304,18 @@ func getTLSInfo(respTLS, reqTLS *tls.ConnectionState) map[string]string {
 	return tlsInfo
 }
 
+// 从 RemoteAddr 中提取 IP 地址
+func getRealIP(req *http.Request) string {
+	ip, _, err := net.SplitHostPort(req.RemoteAddr)
+	if err != nil {
+		return ""
+	}
+	if net.ParseIP(ip) == nil {
+		return ""
+	}
+	return ip
+}
+
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host := r.Host
 	if strings.Contains(r.Host, ":") {
@@ -314,4 +385,187 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.doRequest(w, r)
+}
+
+func (p *Proxy) doRequestEx(rw http.ResponseWriter, r *http.Request) {
+
+	//fmt.Println(strings.Repeat("#", 100))
+	//fmt.Println("Request:")
+	//requestDump, err := httputil.DumpRequest(r, true)
+	//if err != nil {
+	//	fmt.Println("Error dumping request:", err)
+	//	return
+	//}
+	//fmt.Println(string(bytes.TrimSpace(requestDump)))
+
+	reqBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(rw, "Failed to read request body", http.StatusInternalServerError)
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewBuffer(reqBody))
+
+	//getBody, err := r.GetBody()
+	//if err != nil {
+	//	return
+	//}
+	//reqBody, err := io.ReadAll(getBody)
+
+	// switch r.Method {
+	// case http.MethodGet:
+	// 	options := []string{
+	// 		"--compressed", "--insecure",
+	// 		"--socks5 127.0.0.1:10808",
+	// 	}
+	// 	curl.Http1Get(options, r.Header, r.URL.String())
+	// case http.MethodPost:
+	// }
+
+	t := HttpTransport()
+	begin := time.Now()
+	fmt.Println(r.Header.Get("accept-encoding"))
+	response, err := t.RoundTrip(r)
+	spend := uint16(time.Now().Sub(begin).Milliseconds())
+	if err != nil {
+		http.Error(rw, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+
+	defer func() {
+		_ = response.Body.Close()
+	}()
+
+	copyHeader(rw.Header(), response.Header)
+	rw.WriteHeader(response.StatusCode)
+
+	//fmt.Println(strings.Repeat("#", 100))
+	//fmt.Println("Response:")
+	//responseDump, err := httputil.DumpResponse(response, true)
+	//if err != nil {
+	//	fmt.Println("Error dumping response:", err)
+	//	return
+	//}
+	//fmt.Println(string(bytes.TrimSpace(responseDump)))
+
+	var size int64
+	var respBody string
+	contentTypes := response.Header.Get("Content-Type")
+	if strings.Contains(strings.ToLower(contentTypes), "image") || strings.Contains(strings.ToLower(contentTypes), "video") {
+		size, _ = io.Copy(rw, response.Body)
+	} else {
+		bodyBytes, err := io.ReadAll(response.Body)
+		if err != nil {
+			http.Error(rw, "Failed to read response body", http.StatusInternalServerError)
+			return
+		}
+		s, _ := rw.Write(bodyBytes)
+		size = int64(s)
+
+		if response.Header.Get("Content-Encoding") == "br" {
+			bodyBytes, err = io.ReadAll(brotli.NewReader(bytes.NewReader(bodyBytes)))
+			if err != nil {
+				return
+			}
+		}
+		if response.Header.Get("Content-Encoding") == "deflate" {
+			reader := flate.NewReader(bytes.NewReader(bodyBytes))
+			defer func() {
+				if reader != nil {
+					err = reader.Close()
+					if err != nil {
+						return
+					}
+				}
+			}()
+			bodyBytes, err = io.ReadAll(reader)
+			if err != nil {
+				return
+			}
+		}
+		if response.Header.Get("Content-Encoding") == "gzip" {
+			reader, err := gzip.NewReader(bytes.NewReader(bodyBytes))
+			defer func() {
+				if reader != nil {
+					err = reader.Close()
+					if err != nil {
+						return
+					}
+				}
+			}()
+			if err != nil {
+				return
+			}
+			bodyBytes, err = io.ReadAll(reader)
+			if err != nil {
+				return
+			}
+		}
+		// 拦截修改数据
+		// if hookFunc != nil {
+		// 	bodyBytes = hookFunc(r.URL, bodyBytes)
+		// }
+
+		respBody = string(bodyBytes)
+	}
+
+	go func(r *http.Request, response *http.Response) {
+		reqHeader := make(map[string]string)
+		for k := range r.Header {
+			reqHeader[k] = r.Header.Get(k)
+		}
+		respHeader := make(map[string]string)
+		for k := range response.Header {
+			respHeader[k] = response.Header.Get(k)
+		}
+
+		//reqTrailer := make(map[string]string)
+		//for k := range r.Trailer {
+		//	reqTrailer[k] = r.Trailer.Get(k)
+		//}
+		//respTrailer := make(map[string]string)
+		//for k := range response.Trailer {
+		//	respTrailer[k] = response.Trailer.Get(k)
+		//}
+
+		reqCookie := make(map[string]string)
+		for _, v := range r.Cookies() {
+			reqCookie[v.Name] = v.Raw
+		}
+		respCookie := make(map[string]string)
+		for _, v := range response.Cookies() {
+			respCookie[v.Name] = v.Raw
+		}
+
+		contentType := contentTypes
+		for _, v := range strings.Split(contentTypes, ";") {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				continue
+			}
+			if strings.Contains(strings.ToLower(v), "charset=") {
+				continue
+			}
+			contentType = v
+			break
+		}
+
+		//p.logger.Info("Response", "StatusCode", response.StatusCode, r.Method, r.URL.String(), "contentType", contentType)
+
+		p.messageChan <- &Message{
+			Url:        r.URL.String(),
+			RemoteAddr: r.RemoteAddr,
+			Method:     r.Method,
+			Type:       contentType,
+			Time:       spend,
+			Size:       uint16(size),
+			Status:     uint16(response.StatusCode),
+			ReqHeader:  reqHeader,
+			ReqCookie:  reqCookie,
+			ReqBody:    string(reqBody),
+			RespHeader: respHeader,
+			RespCookie: respCookie,
+			RespBody:   respBody,
+			RespTls:    getTLSInfo(response.TLS, r.TLS),
+		}
+	}(r, response)
 }
